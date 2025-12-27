@@ -8,48 +8,53 @@ on:
   workflow_dispatch:
 
 jobs:
-  package:
+  discover:
     runs-on: ubuntu-latest
+    outputs:
+      skills: ${{ steps.find-skills.outputs.skills }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Find skills
+        id: find-skills
+        run: |
+          # Find all directories containing SKILL.md
+          skills_json=$(find . -mindepth 2 -maxdepth 2 -name "SKILL.md" -type f -exec dirname {} \; | sed 's|^\./||' | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          echo "skills=${skills_json}" >> $GITHUB_OUTPUT
+          echo "Found skills: ${skills_json}"
+
+  package:
+    needs: discover
+    if: needs.discover.outputs.skills != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        skill: ${{ fromJson(needs.discover.outputs.skills) }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Find and package skills
+      - name: Package skill ${{ matrix.skill }}
         run: |
-          # Save workspace root
-          WORKSPACE_ROOT=$(pwd)
+          # Create temp directory for packaging
+          mkdir -p package-temp
 
-          # Find all directories containing SKILL.md
-          skills=$(find . -mindepth 2 -maxdepth 2 -name "SKILL.md" -type f -exec dirname {} \;)
+          # Copy skill directory to temp with proper structure
+          cp -r "${{ matrix.skill }}" package-temp/
 
-          if [ -z "$skills" ]; then
-            echo "No skills found"
-            exit 0
-          fi
+          # Create zip with directory structure (skill-name/SKILL.md, etc.)
+          cd package-temp
+          zip -r "../${{ matrix.skill }}.zip" "${{ matrix.skill }}" -x "*.git*" -x "*/__pycache__/*" -x "*.pyc"
+          cd ..
 
-          # Create directory for packaged skills
-          mkdir -p "${WORKSPACE_ROOT}/packaged-skills"
+          echo "Packaged ${{ matrix.skill }}.zip"
+          unzip -l "${{ matrix.skill }}.zip"
 
-          # Package each skill
-          for skill_path in $skills; do
-            skill_name=$(basename "$skill_path")
-            echo "Packaging skill: $skill_name"
-
-            # Create zip file
-            cd "$skill_path"
-            zip -r "${WORKSPACE_ROOT}/packaged-skills/${skill_name}.zip" . -x "*.git*" -x "__pycache__/*" -x "*.pyc"
-            cd "${WORKSPACE_ROOT}"
-          done
-
-          # List packaged skills
-          echo "Packaged skills:"
-          ls -lh packaged-skills/
-
-      - name: Upload skill artifacts
+      - name: Upload ${{ matrix.skill }} artifact
         uses: actions/upload-artifact@v4
         with:
-          name: skills
-          path: packaged-skills/*.zip
+          name: ${{ matrix.skill }}
+          path: ${{ matrix.skill }}.zip
           retention-days: 90
-          if-no-files-found: warn
