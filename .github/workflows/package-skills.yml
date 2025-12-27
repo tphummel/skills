@@ -12,9 +12,17 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       skills: ${{ steps.find-skills.outputs.skills }}
+      short_sha: ${{ steps.get-sha.outputs.short_sha }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Get short SHA
+        id: get-sha
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "Short SHA: ${SHORT_SHA}"
 
       - name: Find skills
         id: find-skills
@@ -58,3 +66,38 @@ jobs:
           name: ${{ matrix.skill }}
           path: ${{ matrix.skill }}.zip
           retention-days: 90
+
+  release:
+    needs: [discover, package]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.discover.outputs.skills != '[]'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          # Move all skill zips to release-assets directory
+          find artifacts -name "*.zip" -exec cp {} release-assets/ \;
+          ls -lh release-assets/
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          SHORT_SHA="${{ needs.discover.outputs.short_sha }}"
+
+          # Create release with short SHA as tag
+          gh release create "${SHORT_SHA}" \
+            --title "Skills Release ${SHORT_SHA}" \
+            --notes "Packaged skills from commit ${GITHUB_SHA}" \
+            release-assets/*.zip
