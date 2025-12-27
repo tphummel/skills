@@ -17,6 +17,9 @@ jobs:
 
       - name: Find and package skills
         run: |
+          # Save workspace root
+          WORKSPACE_ROOT=$(pwd)
+
           # Find all directories containing SKILL.md
           skills=$(find . -mindepth 2 -maxdepth 2 -name "SKILL.md" -type f -exec dirname {} \;)
 
@@ -26,7 +29,7 @@ jobs:
           fi
 
           # Create directory for packaged skills
-          mkdir -p packaged-skills
+          mkdir -p "${WORKSPACE_ROOT}/packaged-skills"
 
           # Package each skill
           for skill_path in $skills; do
@@ -35,8 +38,8 @@ jobs:
 
             # Create zip file
             cd "$skill_path"
-            zip -r "../../packaged-skills/${skill_name}.zip" . -x "*.git*" -x "__pycache__/*" -x "*.pyc"
-            cd - > /dev/null
+            zip -r "${WORKSPACE_ROOT}/packaged-skills/${skill_name}.zip" . -x "*.git*" -x "__pycache__/*" -x "*.pyc"
+            cd "${WORKSPACE_ROOT}"
           done
 
           # List packaged skills
