@@ -1,0 +1,52 @@
+name: Package Skills
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Find and package skills
+        run: |
+          # Find all directories containing SKILL.md
+          skills=$(find . -mindepth 2 -maxdepth 2 -name "SKILL.md" -type f -exec dirname {} \;)
+
+          if [ -z "$skills" ]; then
+            echo "No skills found"
+            exit 0
+          fi
+
+          # Create directory for packaged skills
+          mkdir -p packaged-skills
+
+          # Package each skill
+          for skill_path in $skills; do
+            skill_name=$(basename "$skill_path")
+            echo "Packaging skill: $skill_name"
+
+            # Create zip file
+            cd "$skill_path"
+            zip -r "../../packaged-skills/${skill_name}.zip" . -x "*.git*" -x "__pycache__/*" -x "*.pyc"
+            cd - > /dev/null
+          done
+
+          # List packaged skills
+          echo "Packaged skills:"
+          ls -lh packaged-skills/
+
+      - name: Upload skill artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: skills
+          path: packaged-skills/*.zip
+          retention-days: 90
+          if-no-files-found: warn
