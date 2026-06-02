@@ -126,21 +126,24 @@ git push -u origin add-guest-name-guest
 # Create PR via Gitea web interface
 ```
 
-#### 4. Post-Deployment Monitoring Setup
-After the guest is successfully deployed and the application is running:
+#### 4. Post-Deployment Checklist
+After the guest is deployed and the application is running:
 
-1. **Access Uptime Kuma**: Navigate to the monitoring dashboard
-2. **Add HTTP Monitor**: Create a new monitor for the guest's public endpoint
+1. **Add to start website**: Update `start_website_index.html.j2` in the ansible repo to include a link to the new guest's URL.
+
+2. **Add Prometheus scrape target**: Add the guest's node_exporter endpoint to the Prometheus scrape config so host metrics (CPU, memory, disk) are collected.
+
+3. **Add blackbox exporter probe + Alertmanager alert**: Add an HTTP probe for the guest's public URL (`https://subdomain.hummel.casa`) to the blackbox exporter config. Verify the corresponding Alertmanager alert fires when the service goes down.
+
+4. **Add Uptime Kuma monitor**: Create an HTTP(s) monitor for the public endpoint.
    - **Monitor Type**: HTTP(s)
-   - **Friendly Name**: Guest application name (e.g., "Notes App")
+   - **Friendly Name**: Guest application name
    - **URL**: Full application URL (e.g., `https://notes.hummel.casa`)
-   - **Heartbeat Interval**: 60 seconds (recommended)
+   - **Heartbeat Interval**: 60 seconds
    - **Max Retries**: 1
    - **Timeout**: 48 seconds
-3. **Configure Notifications**: Ensure the monitor is connected to appropriate notification channels
-4. **Test Monitor**: Verify the monitor can successfully reach the application
 
-This ensures all public services are properly monitored for uptime and availability.
+All four steps should be completed for every new public-facing guest.
 
 ### Current Infrastructure Details
 
