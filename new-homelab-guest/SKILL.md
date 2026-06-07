@@ -1,290 +1,340 @@
 ---
 name: new-homelab-guest
-description: Add new homelab guest LXC using standard Terraform pattern for hummel.casa infrastructure
+description: Add a new LXC guest to the homelab across both terraform and ansible repos
+argument-hint: [guest-name]
 ---
 
-# Claude Code Instructions for hummel.casa Terraform Infrastructure
+# Add a new LXC guest to the homelab
 
-This repository manages Proxmox LXC guests using Terraform for the hummel.casa homelab infrastructure.
+You are adding a new Proxmox LXC guest named `$ARGUMENTS` to the homelab infrastructure.
 
-## Primary Workflow: Adding New LXC Guests
+## Step 0: Locate repos
 
-### Prerequisites (Manual Steps Outside Repository)
-1. **Reserve MAC Address**: Get next virtual MAC address from MAC address table in Notion doc (format: 0A:BC:DE:00:00:XX)
-2. **Reserve IP Address**: Get next private IP in homelab CIDR range (10.20.71.XXX) from Notion doc
-3. **Create DHCP Reservation**: Add MAC/IP pair to Unifi controller
-4. **Plan Application**: Select docker image/tag and subdomain (e.g., my-app -> my-app.hummel.casa)
-5. **Create Ansible Playbook**: Add playbook to ansible repository at https://gitea.hummel.casa/hummel.casa/ansible
+Before doing anything else, identify the terraform and ansible repos. Check in this order:
 
-### Repository Structure
-- `main.tf`: Core infrastructure with locals.guests definitions and shared resources
-- Individual `{guest-name}.tf` files: Each guest has its own file with random_password, proxmox_lxc, and cloudflare_record resources
-- `setup-ansible-pull-cron.sh`: Provisioner script that configures new guests
+1. Look for `./terraform/` and `./ansible/` relative to the current working directory.
+2. If not found, search `~/Code` for the homelab terraform repo: `fd -t d terraform ~/Code --max-depth 3` then verify it contains `main.tf` with proxmox LXC resources (`rg 'proxmox_lxc' <path>/main.tf`).
+3. Search `~/Code` for the ansible repo: `fd -t d ansible ~/Code --max-depth 3` then verify it contains homelab playbooks (`rg 'hummel.casa' <path>/*.yml --max-count 1`). There may be multiple ansible dirs; pick the one with active playbooks.
 
-### Steps to Add New Guest
+Set `$TERRAFORM_REPO` and `$ANSIBLE_REPO` to the absolute paths of those directories. Use these variables for all subsequent file paths.
 
-#### 1. Add Guest Definition to main.tf
-Add new entry to `locals.guests` in main.tf:
+---
+
+## Information to gather from the user
+
+Ask the user for all of these before writing any files:
+
+### Infrastructure (Terraform)
+
+#### MAC address and IP address (gather first)
+
+Before asking other questions, scan `$TERRAFORM_REPO/main.tf` to find all MAC addresses (`0A:BC:DE:00:00:XX`) and IP addresses (`10.20.71.XXX`) currently in use. Determine the next available values (highest in-use + 1 for each).
+
+Ask the user for MAC and IP together in a single question using `AskUserQuestion`. Present:
+- **Option 1**: The next sequential MAC and IP (e.g., `0A:BC:DE:00:00:62 / 10.20.71.157`) with a description noting these are the next available
+- **Option 2**: "I'll specify my own" — so the user can type custom values via the "Other" free-text input
+
+The user will frequently want to specify their own values rather than using the next sequential ones. After receiving the user's choice, verify the chosen MAC and IP are not already in use by grepping `$TERRAFORM_REPO/main.tf` for both values. If either is taken, inform the user and ask again.
+
+#### Remaining infrastructure settings
+1. **Proxmox target node** (available: pve, pve2, pve4, pve5, pve6, pve7, pve8, pve9)
+2. **CPU cores** (typically 1)
+3. **RAM in MiB** (common: 256, 512, 1024, 2048, 4096, 16384)
+4. **Root filesystem size** (common: 5G, 8G, 10G, 12G, 16G, 24G, 25G, 100G)
+5. **NAS mount needed?** (mountpoint for nas-homelab-guests at /mnt/nas)
+
+### Configuration (Ansible)
+6. **Does this guest run a container?** If so, what image, tag, and port? (podman is the default runtime; only use Docker if explicitly requested)
+7. **Does it need Caddy reverse proxy with TLS?** (most guests do)
+8. **What port does the service expose?** (for Caddy target_port)
+9. **Does it need Node.js?** If so, which LTS version?
+10. **Any special packages, config files, or environment variables?**
+
+---
+
+## Part 1: Terraform
+
+All file paths are relative to `$TERRAFORM_REPO/`.
+
+### Step 1: Add guest definition to main.tf
+
+Add a new entry inside the `locals.guests` block, before the closing `}`. Follow the existing format:
+
 ```hcl
 guest_name = {
   mac              = "0A:BC:DE:00:00:XX"
   dhcp_reservation = "10.20.71.XXX"
-  domain           = "subdomain.hummel.casa"
-  target_node      = "pveX"           # Available: pve, pve2, pve4, pve5, pve6, pve7, pve8, pve9
-  cpu_cores        = 1                # Typically 1
-  ram_mib          = 512              # Common: 256, 512, 1024, 2048, 4096
-  root_fs_size     = "8G"             # Common: 5G, 8G, 12G, 16G, 24G, 25G
-  playbook         = "playbook.yml"   # Ansible playbook name
+  domain           = "guest-name.hummel.casa"
+  target_node      = "pveX"
+  cpu_cores        = 1
+  ram_mib          = 2048
+  root_fs_size     = "16G"
+  playbook         = "guest-name.yml"
 }
 ```
 
-#### 2. Create Individual Guest File
-Create `{guest-name}.tf` with three resources:
+Use underscores in the HCL key name (e.g., `my_guest`), hyphens in the domain (e.g., `my-guest.hummel.casa`).
 
-```hcl
-resource "random_password" "guest_name" {
-  length           = 30
-  special          = true
-  override_special = "_%@"
-}
+### Step 2: Create guest-name.tf
 
-resource "proxmox_lxc" "guest_name" {
-  target_node  = local.guests.guest_name.target_node
-  start        = true
-  onboot       = true
-  hostname     = local.guests.guest_name.domain
-  ostemplate   = local.debian_12_bookwork_lxc_template
-  password     = random_password.guest_name.result
-  unprivileged = true
+The file must contain these four resources:
 
-  memory = local.guests.guest_name.ram_mib
-  cores  = local.guests.guest_name.cpu_cores
+1. `random_password.guest_name` - 30 char password with `_%@` specials
+2. `proxmox_lxc.guest_name` - LXC container with:
+   - `depends_on = [null_resource.guest_name_unifi_client]`
+   - `ostemplate = local.debian_12_bookworm_lxc_template`
+   - NAS mountpoint block (if requested)
+   - SSH public keys: `lxc_guest_ssh`, `atlantis_root_2`, `gitea_hummel_casa`, `olivetin`
+   - File + remote-exec provisioners for ansible-pull setup
+   - SSH connection block using `var.atlantis_ansible_ssh_private_key_file`
+   - `lifecycle { ignore_changes = [ostemplate] }`
+3. `cloudflare_record.guest_name` - A record for the domain
+4. `null_resource.guest_name_unifi_client` - UniFi DHCP reservation with:
+   - Create provisioner: login, create client, poll for confirmation (120s timeout, 30s propagation wait)
+   - Destroy provisioner: login, forget-sta by MAC
+   - Both use `--insecure` flag for curl
 
-  features {
-    nesting = true  # Required for Docker
-  }
+**IMPORTANT**: Read an existing guest .tf file (like `$TERRAFORM_REPO/ntfy.tf`) before writing to ensure you match the exact current pattern, including the UniFi polling logic.
 
-  rootfs {
-    storage = "local-lvm"
-    size    = local.guests.guest_name.root_fs_size
-  }
+### Step 3: Terraform git workflow
 
-  ssh_public_keys = <<-EOT
-    ${local.public_keys.lxc_guest_ssh}
-    ${local.public_keys.atlantis_root_2}
-    ${local.public_keys.gitea_hummel_casa}
-  EOT
+Terraform changes always go to a feature branch, never directly to main:
 
-  network {
-    name   = "eth0"
-    bridge = "vmbr0"
-    ip     = "dhcp"
-    hwaddr = local.guests.guest_name.mac
-  }
-
-  provisioner "file" {
-    source      = "setup-ansible-pull-cron.sh"
-    destination = "/tmp/script.sh"
-  }
-
-  provisioner "remote-exec" {
-    inline = [
-      "chmod +x /tmp/script.sh",
-      "/tmp/script.sh ${local.guests.guest_name.playbook}"
-    ]
-  }
-
-  connection {
-    type        = "ssh"
-    user        = "root"
-    private_key = file("/root/.ssh/id_ed25519")
-    host        = local.guests.guest_name.dhcp_reservation
-  }
-
-  lifecycle {
-    ignore_changes = [ostemplate]
-  }
-}
-
-resource "cloudflare_record" "guest_name" {
-  zone_id = data.cloudflare_zone.hummel_casa.zone_id
-  name    = element(split(".", local.guests.guest_name.domain), 0)
-  content = local.guests.guest_name.dhcp_reservation
-  type    = "A"
-  ttl     = 1
-  proxied = false
-  comment = local.dns_comment
-}
-```
-
-#### 3. Git Workflow
 ```bash
+cd $TERRAFORM_REPO
+git checkout main && git pull origin main
 git checkout -b add-guest-name-guest
 git add main.tf guest-name.tf
 git commit -m "add guest-name guest"
 git push -u origin add-guest-name-guest
-# Create PR via Gitea web interface
 ```
 
-#### 4. Post-Deployment Checklist
-After the guest is deployed and the application is running:
+---
 
-1. **Add to start website**: Update `start_website_index.html.j2` in the ansible repo to include a link to the new guest's URL.
+## Part 2: Ansible
 
-2. **Add Prometheus scrape target**: Add the guest's node_exporter endpoint to the Prometheus scrape config so host metrics (CPU, memory, disk) are collected.
+All file paths are relative to `$ANSIBLE_REPO/`.
 
-3. **Add blackbox exporter probe + Alertmanager alert**: Add an HTTP probe for the guest's public URL (`https://subdomain.hummel.casa`) to the blackbox exporter config. Verify the corresponding Alertmanager alert fires when the service goes down.
+### Step 1: Create guest-name.yml
 
-4. **Add Uptime Kuma monitor**: Create an HTTP(s) monitor for the public endpoint.
-   - **Monitor Type**: HTTP(s)
-   - **Friendly Name**: Guest application name
-   - **URL**: Full application URL (e.g., `https://notes.hummel.casa`)
-   - **Heartbeat Interval**: 60 seconds
-   - **Max Retries**: 1
-   - **Timeout**: 48 seconds
+Read an existing playbook (e.g., `$ANSIBLE_REPO/verdaccio.yml`) to get the current `dns_api_token` value — do not hardcode it, copy it from there.
 
-All four steps should be completed for every new public-facing guest.
+```yaml
+---
+- hosts: localhost
+  become: yes
+  gather_facts: yes
+  vars:
+    domain: 'guest-name.hummel.casa'
+    dns_api_token: '<copy from existing playbook>'
+    tls_email: 'tls@hummel.casa'
+    # If container-based, add container vars:
+    container:
+      name: guest-name
+      description: "Description of the service"
+      image_name: 'dockerhub.hummel.casa/org/image'
+      image_tag: 'v1.0.0'
+      exposed_port: '8080'
+  roles:
+    - role: ansible-role-caddy-tls-dns
+      vars:
+        caddy_domain: '{{ domain }}'
+        caddy_tls_email: '{{ tls_email }}'
+        caddy_dns_api_token: '{{ dns_api_token }}'
+        caddy_target_port: "{{ container.exposed_port }}"
+    - role: geerlingguy.node_exporter
+  tasks:
+    # ... service-specific tasks
+  handlers:
+    # ... if needed
+```
 
-### Current Infrastructure Details
+### Common ansible patterns
 
-**Domain**: hummel.casa
-**Terraform Backend**: PostgreSQL at pg.hummel.casa:5432/terraform_backend
-**LXC Template**: debian-12-standard_12.7-1_amd64.tar.zst
-**Ansible Repository**: https://gitea.hummel.casa/hummel.casa/ansible
-**Provisioner**: setup-ansible-pull-cron.sh (runs every 60 minutes)
+**Podman-based service (default)**: Use `$ANSIBLE_REPO/verdaccio.yml` as the reference pattern. The key elements are:
 
-### Available Proxmox Nodes
-- `pve`: 10.20.71.10
-- `pve2`: 10.20.71.20
-- `pve4`: 10.20.71.40
-- `pve5`: 10.20.71.50
-- `pve6`: 10.20.71.60
-- `pve7`: 10.20.71.15
-- `pve8`: 10.20.71.25
-- `pve9`: 10.20.71.35
+1. **Install podman** via apt (no role needed, just a task):
+   ```yaml
+   - name: Install podman
+     apt:
+       name:
+         - podman
+       state: present
+       update_cache: yes
+   ```
 
-### SSH Public Keys Included
-All guests receive these SSH public keys for access:
-- lxc_guest_ssh: General LXC access key
-- atlantis_root_2: Atlantis/automation access
-- gitea_hummel_casa: Gitea integration key
+2. **Systemd service file** using podman directly (no daemon, no socket):
+   ```yaml
+   - name: Create systemd service file for {{ container.name }}
+     copy:
+       content: |
+         [Unit]
+         Description={{ container.description }}
+         After=network-online.target
+         Wants=network-online.target
 
-## Provisioner Script Details
+         [Service]
+         Restart=on-failure
+         RestartSec=5s
+         ExecStartPre=-/usr/bin/podman rm -f {{ container.name }}
+         ExecStart=/usr/bin/podman run --name {{ container.name }} \
+           --security-opt=no-new-privileges \
+           --pids-limit=100 \
+           --memory=512m \
+           --memory-swap=512m \
+           -p 127.0.0.1:{{ container.exposed_port }}:{{ container.exposed_port }} \
+           -v /path/on/host:/path/in/container:ro \
+           -v /path/on/host:/path/in/container \
+           -e TZ=America/Los_Angeles \
+           {{ container.image_name }}:{{ container.image_tag }}
+         ExecStop=/usr/bin/podman stop -t 10 {{ container.name }}
+         ExecStopPost=/usr/bin/podman rm -f {{ container.name }}
+         TimeoutStopSec=30
 
-The `setup-ansible-pull-cron.sh` script automatically configures each new LXC guest:
+         [Install]
+         WantedBy=multi-user.target
+       dest: /etc/systemd/system/{{ container.name }}.service
+       mode: 0644
+     notify:
+       - Reload systemd
+       - Start service
+   ```
+
+3. **Handlers** for reload, restart, and image cleanup:
+   ```yaml
+   handlers:
+     - name: Reload systemd
+       systemd:
+         daemon_reload: yes
+
+     - name: Start service
+       systemd:
+         name: "{{ container.name }}"
+         enabled: yes
+         state: restarted
+       notify:
+         - Cleanup old images
+
+     - name: Cleanup old images
+       listen: Start service
+       shell: |
+         set -euo pipefail
+         repo="{{ container.image_name }}"
+         keep_tag="{{ container.image_tag }}"
+         keep_ref="${repo}:${keep_tag}"
+         echo "==> Evaluating images for repo: ${repo}"
+         podman image ls --format '{{'{{'}}.Repository{{'}}'}}:{{'{{'}}.Tag{{'}}'}}' "${repo}" || exit 0
+         echo "==> Keeping: ${keep_ref}"
+         old_images=$(podman image ls --format '{{'{{'}}.Repository{{'}}'}}:{{'{{'}}.Tag{{'}}'}}' "${repo}" \
+           | awk -v keep="${keep_ref}" '$0 != keep && $0 !~ /<none>:/ {print $0}')
+         if [ -z "$old_images" ]; then
+           echo "==> No old images found to remove."
+         else
+           echo "==> Will remove:"
+           echo "$old_images"
+           echo "$old_images" | xargs -r -n1 podman image rm -f
+         fi
+         echo "==> Pruning dangling layers..."
+         podman image prune -f --filter "dangling=true"
+       args:
+         executable: /bin/bash
+       register: cleanup_result
+       changed_when: true
+       notify:
+         - Show cleanup output
+
+     - name: Show cleanup output
+       debug:
+         var: cleanup_result.stdout_lines
+   ```
+
+**Docker-based service (only if explicitly requested)**: Use the `geerlingguy.docker` role and read an existing Docker-based playbook (e.g., `$ANSIBLE_REPO/ntfy.yml`, `$ANSIBLE_REPO/mealie.yml`) for the pattern. Do NOT use Docker unless the user specifically asks for it.
+
+**Node.js service** (requires `curl` installed first):
+```yaml
+- name: Install required packages
+  apt:
+    name:
+      - curl
+    state: present
+
+- name: Check current Node.js version
+  command: node --version
+  register: node_version
+  ignore_errors: yes
+  changed_when: false
+
+- name: Remove Debian default nodejs if not vXX
+  apt:
+    name: nodejs
+    state: absent
+    purge: yes
+  when: node_version.rc == 0 and not node_version.stdout.startswith('vXX')
+
+- name: Install Node.js XX LTS repository
+  shell: |
+    curl -fsSL https://deb.nodesource.com/setup_XX.x | bash -
+  when: node_version.rc != 0 or not node_version.stdout.startswith('vXX')
+
+- name: Install Node.js XX
+  apt:
+    name: nodejs
+    state: latest
+    update_cache: yes
+```
+
+**Note**: Debian 12 ships Node 18 without npm. The nodesource package bundles npm. You must purge the Debian nodejs first or apt won't upgrade, and `curl` is not installed by default in LXC containers.
+
+**Conditional global npm install**:
+```yaml
+- name: Check if tool-name is installed
+  command: which tool-name
+  register: tool_check
+  ignore_errors: yes
+  changed_when: false
+
+- name: Install tool-name globally if not on PATH
+  command: npm install -g tool-name@latest
+  when: tool_check.rc != 0
+```
+
+**Docker image registries**:
+- `dockerhub.hummel.casa/` for DockerHub images
+- `ghcr.hummel.casa/` for GitHub Container Registry images
+- `registry.hummel.casa/` for custom images
+
+### Step 2: Add Prometheus targets
+
+Edit `$ANSIBLE_REPO/prometheus.yml` to add the new guest to both scrape target lists:
+
+1. **node_exporter targets** — add `"guest-name.hummel.casa:9100"` to the `node_exporter` job's targets list (around line 62-96)
+2. **caddy targets** — add `"guest-name.hummel.casa:2019"` to the `caddy` job's targets list (around line 101-130)
+
+Read the file first to find the exact insertion points. Add new entries at the end of each target list, before the closing `]`.
+
+### Step 3: Add link to start page
+
+Edit `$ANSIBLE_REPO/templates/start_website_index.html.j2` to add a link for the new guest. Choose the appropriate section:
+
+- **Apps** — user-facing applications (around line 286)
+- **Ops Apps** — infrastructure/monitoring tools (around line 308)
+- **Automation Tools** — automation services (around line 344)
+- **Gaming** — game servers (around line 368)
+
+Add a `<dt>` entry in the chosen section's `<dl>`:
+```html
+<dt><a href="https://guest-name.hummel.casa">Guest Display Name</a></dt>
+```
+
+Ask the user which section the new guest belongs in.
+
+### Step 4: Ansible git workflow
+
+Ansible playbooks are committed and pushed directly to main:
 
 ```bash
-#!/bin/bash
-
-ANSIBLE_PLAYBOOK=$1
-
-apt-get update
-apt-get install ansible -y
-apt-get install git -y
-
-cat > /etc/systemd/system/ansible-pull.timer <<EOF
-[Unit]
-Description=Run ansible-pull every few minutes
-
-[Timer]
-OnBootSec=5min
-OnUnitActiveSec=60min
-Unit=ansible-pull.service
-
-[Install]
-WantedBy=timers.target
-EOF
-
-cat > /etc/systemd/system/ansible-pull.service <<EOF
-[Unit]
-Description=ansible-pull
-
-[Service]
-ExecStart=/usr/bin/ansible-pull -U https://gitea.hummel.casa/hummel.casa/ansible.git -C main -i localhost, $ANSIBLE_PLAYBOOK
-EOF
-
-ansible-galaxy install geerlingguy.docker,7.0.2
-ansible-galaxy install git+https://github.com/tphummel/ansible-role-caddy-tls-dns.git,main
-ansible-galaxy role install geerlingguy.node_exporter,2.1.0
-
-systemctl daemon-reload
-systemctl enable ansible-pull.timer
-systemctl start ansible-pull.timer
-# run ansible-pull once, adhoc, right now
-systemctl start ansible-pull.service
-
-# block until ansible-pull is done
-while systemctl is-active --quiet ansible-pull.service;
-do
-  echo "Waiting for adhoc run of ansible-pull to finish...";
-  sleep 2;
-done
+cd $ANSIBLE_REPO
+git add guest-name.yml prometheus.yml templates/start_website_index.html.j2
+git commit -m "add guest-name guest playbook"
+git push origin main
 ```
-
-### Script Functions:
-1. **System Setup**: Updates packages, installs Ansible and Git
-2. **Timer Configuration**: Creates systemd timer running every 60 minutes after initial 5-minute delay
-3. **Service Configuration**: Sets up ansible-pull to fetch from gitea.hummel.casa/hummel.casa/ansible
-4. **Role Installation**: Installs common Ansible roles (Docker, Caddy, Node Exporter)
-5. **Initial Run**: Executes the specified playbook immediately after guest creation
-
-## Example Guest Configurations
-
-### Typical Web Application Guest
-```hcl
-example_app = {
-  mac              = "0A:BC:DE:00:00:XX"
-  dhcp_reservation = "10.20.71.XXX"
-  domain           = "example-app.hummel.casa"
-  target_node      = "pve8"
-  cpu_cores        = 1
-  ram_mib          = 512
-  root_fs_size     = "8G"
-  playbook         = "example-app.yml"
-}
-```
-
-### Resource-Heavy Application Guest
-```hcl
-heavy_app = {
-  mac              = "0A:BC:DE:00:00:XX"
-  dhcp_reservation = "10.20.71.XXX"
-  domain           = "heavy-app.hummel.casa"
-  target_node      = "pve2"
-  cpu_cores        = 1
-  ram_mib          = 4096
-  root_fs_size     = "25G"
-  playbook         = "heavy-app.yml"
-}
-```
-
-## Troubleshooting
-
-### Common Issues
-- **Guest won't start**: Check target_node availability and LXC template existence
-- **Ansible fails**: Verify playbook exists in ansible repository and syntax is valid
-- **DNS not resolving**: Confirm Cloudflare record was created and propagated
-- **SSH access issues**: Verify DHCP reservation matches guest IP assignment
-
-### Required Environment Variables
-```bash
-# Proxmox API access
-export PM_API_TOKEN_ID="terraform-prov@pve!mytoken"
-export PM_API_TOKEN_SECRET="token"
-
-# Cloudflare DNS management
-export CLOUDFLARE_API_TOKEN="token"
-
-# PostgreSQL backend access
-export PGUSER="user"
-export PGPASSWORD="password"
-```
-
-## Best Practices
-
-1. **Resource Allocation**: Start with minimal resources, scale up as needed
-2. **Node Distribution**: Spread guests across available Proxmox nodes for load balancing
-3. **Naming Convention**: Use descriptive, URL-friendly names for domains
-4. **Branch Strategy**: Always create feature branches for new guests
-5. **Documentation**: Update ansible playbooks with service-specific configurations
-6. **Monitoring**: Always add new public endpoints to Uptime Kuma after deployment for availability monitoring
