@@ -23,6 +23,8 @@ Accept: application/json
 Content-Type: application/json   (for POST/PUT/PATCH)
 ```
 
+> **Critical:** `Accept: application/json` is required on every request — including write operations with no response body (taggings, closure, triage). Fizzy's bearer token authentication is gated on `request.format.json?`. Without this header, the token is silently rejected with a 401 even with valid credentials.
+
 ## Account slug
 
 Every resource URL is scoped to an **account slug** — a path segment like `/897362094` that identifies the account. Resolve it once per session:
@@ -32,7 +34,9 @@ curl -s -H "Authorization: Bearer $FIZZY_API_KEY" -H "Accept: application/json" 
   "$FIZZY_BASE_URL/my/identity" | jq -r '.accounts[0].slug'
 ```
 
-Cache the result as `ACCOUNT_SLUG` and reuse it. For self-hosted single-account instances, the slug is stable and rarely changes.
+Cache the result as `ACCOUNT_SLUG` and reuse it — don't re-fetch it on every call. For self-hosted single-account instances, the slug is stable and rarely changes.
+
+If you're using a dedicated bot/agent token (rather than a personal one), comments and actions made with it will show up as that bot user in Fizzy's activity feed — useful for keeping agent activity visibly distinct from human activity.
 
 ## Fizzy workflow model
 
@@ -70,11 +74,11 @@ curl -s ... "$FIZZY_BASE_URL$ACCOUNT_SLUG/cards?board_ids[]=$BOARD_ID" | jq .
 # Unassigned cards
 curl -s ... "$FIZZY_BASE_URL$ACCOUNT_SLUG/cards?assignment_status=unassigned" | jq .
 
-# Search cards by keyword
+# Search cards
 curl -s ... "$FIZZY_BASE_URL$ACCOUNT_SLUG/cards?terms[]=dark+mode" | jq .
 
 # Filter by state (indexed_by values: all, maybe, closed, not_now, stalled, postponing_soon, golden)
-curl -s ... "$FIZZY_BASE_URL$ACCOUNT_SLUG/cards?indexed_by=closed" | jq .
+curl -s ... "$FIZZY_BASE_URL$ACCOUNT_SLUG/cards?indexed_by=maybe" | jq .
 ```
 
 ### Get a specific card
@@ -172,7 +176,7 @@ curl -s -X POST \
   -H "Authorization: Bearer $FIZZY_API_KEY" \
   -H "Accept: application/json" \
   -H "Content-Type: application/json" \
-  -d '{"comment": {"body": "<p>This looks great!</p>"}}' \
+  -d '{"comment": {"body": "This looks great!"}}' \
   "$FIZZY_BASE_URL$ACCOUNT_SLUG/cards/$CARD_NUMBER/comments"
 ```
 
@@ -184,7 +188,7 @@ curl -s -X POST \
   -d '{"tag_title": "bug"}' \
   "$FIZZY_BASE_URL$ACCOUNT_SLUG/cards/$CARD_NUMBER/taggings"
 ```
-**Caution**: this is a toggle, not an add. Calling it twice removes the tag. Check the card's existing `tags` array before calling to avoid accidentally removing a tag.
+**Caution**: this is a toggle, not an add. Calling it twice removes the tag. Before applying a tag, check the card's existing `tags` array and skip the call if the tag is already present.
 
 ### List all tags
 ```bash
@@ -252,7 +256,16 @@ All list endpoints are paginated. If there are more results, the response includ
 link: <https://fizzy.example.com/.../cards?page=2>; rel="next"
 ```
 
-Follow the `next` link until it disappears to collect all pages. For most interactive tasks a single page is sufficient — only paginate when a complete list is needed.
+To fetch all pages, follow the `next` link until it disappears. Example:
+```bash
+page="$FIZZY_BASE_URL$ACCOUNT_SLUG/cards"
+while [ -n "$page" ]; do
+  response=$(curl -sI -H "Authorization: Bearer $FIZZY_API_KEY" \
+    -H "Accept: application/json" -w "\n%{stdout}" "$page")
+  page=$(echo "$response" | grep -i 'link:' | grep -o '<[^>]*>; rel="next"' | grep -o 'https://[^>]*')
+done
+```
+For most interactive tasks, a single page is enough. Only paginate when the user needs a complete list.
 
 ## List parameters
 
@@ -265,11 +278,15 @@ When filtering by multiple IDs, repeat the parameter:
 
 | Status | Meaning |
 |--------|---------|
-| 401 | Bad or missing API key |
+| 401 | Bad or missing API key — **or** database lock contention on write (see below) |
 | 403 | Insufficient permissions |
 | 404 | Resource not found (or no access) |
 | 422 | Validation failed — response body has error details |
 | 500 | Bad input (e.g. wrong type for a field) — validate before sending |
+
+### Write contention on SQLite-backed instances
+
+Self-hosted Fizzy instances commonly use SQLite. Background job workers (e.g. Turbo Stream broadcasts) can compete with API write requests for the database write lock. Under concurrent load, write requests can fail with a misleading `401` response — the actual cause is a database-busy/locked error, not bad auth. If you hit a 401 on a write that looks like it should have valid auth, retry once before assuming it's a real auth failure.
 
 ## Rich text fields
 
@@ -282,9 +299,11 @@ When filtering by multiple IDs, repeat the parameter:
 
 ## Tips
 
-- Resolve the account slug once via `/my/identity` and cache it for the session.
-- Cards are addressed by **number** in URLs (e.g. `/cards/42`), not their internal `id`.
+- Always resolve the account slug first via `/my/identity` if you don't have it, then cache it for the session.
+- Cards are addressed by **number** in URLs (e.g. `/cards/42`), not by their internal `id`.
 - The `column` field on a card is only present when the card has been triaged into a column; cards in Triage/Not Now/Done have no column.
 - `closed: true` means the card is Done.
-- Tag toggling via `/taggings` is a toggle — check existing `tags` before calling if you only want to add.
+- When closing a card and then tagging it (e.g., a terminal status tag), do the operations sequentially — the card must be closed before applying the tag.
+- Check a card's existing `tags` array before calling `/taggings` to avoid accidentally toggling a tag off.
 - When you need a board ID or column ID, list them first — they are opaque strings, not human-readable names.
+- Fizzy's `steps` endpoint (`POST/PUT .../cards/{number}/steps`) gives cards a real to-do checklist — use it for multi-stage work instead of just narrating steps in the description or a comment. Anyone opening the card can see progress at a glance.

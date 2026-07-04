@@ -1,0 +1,41 @@
+{
+  "skill_name": "grist",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "What tables are in my grist doc called Untitled document (docId dwq9JcbNZVaC)? GRIST_BASE_URL and GRIST_API_KEY are already set in the environment.",
+      "expected_output": "Lists the tables in the doc (Table1, Inventory, Tasks) by calling GET /api/docs/dwq9JcbNZVaC/tables with the Bearer auth header, and reports the table names back to the user.",
+      "files": [],
+      "assertions": [
+        "Calls GET on the /api/docs/{docId}/tables endpoint (not a made-up or incorrect path)",
+        "Uses an Authorization: Bearer header with the API key rather than an incorrect auth scheme",
+        "Final answer correctly names all three tables: Table1, Inventory, Tasks",
+        "Makes no write requests (no POST/PATCH/PUT/DELETE) for a read-only task"
+      ]
+    },
+    {
+      "id": 2,
+      "prompt": "Add a new row to my Inventory table in grist doc dwq9JcbNZVaC with Name='Widget' and Quantity=42. GRIST_BASE_URL and GRIST_API_KEY are already set in the environment.",
+      "expected_output": "POSTs a new record to /api/docs/dwq9JcbNZVaC/tables/Inventory/records with fields Name=Widget, Quantity=42, and confirms the row was added (reporting the new row id).",
+      "files": [],
+      "assertions": [
+        "Calls POST on the /api/docs/{docId}/tables/Inventory/records endpoint",
+        "Request body wraps the new row correctly as {\"records\": [{\"fields\": {...}}]} (no top-level id, no require object)",
+        "Fields sent are Name='Widget' and Quantity=42 (not stringified '42' if the column is Numeric)",
+        "Response confirms success and reports the new row id back to the user"
+      ]
+    },
+    {
+      "id": 3,
+      "prompt": "In my grist doc dwq9JcbNZVaC, mark the Tasks row with id 5 as Status='Done'. GRIST_BASE_URL and GRIST_API_KEY are already set in the environment.",
+      "expected_output": "PATCHes /api/docs/dwq9JcbNZVaC/tables/Tasks/records with {\"records\": [{\"id\": 5, \"fields\": {\"Status\": \"Done\"}}]}, and confirms the update succeeded (ideally by re-reading the record).",
+      "files": [],
+      "assertions": [
+        "Calls PATCH (not PUT or POST) on the /api/docs/{docId}/tables/Tasks/records endpoint",
+        "Request body correctly includes the row id: {\"records\": [{\"id\": 5, \"fields\": {\"Status\": \"Done\"}}]}",
+        "Does not overwrite unrelated fields on the row (only Status is set)",
+        "Confirms the update succeeded back to the user"
+      ]
+    }
+  ]
+}

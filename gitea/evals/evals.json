@@ -1,0 +1,23 @@
+{
+  "skill_name": "gitea",
+  "evals": [
+    {
+      "id": 0,
+      "prompt": "What PRs are open on the terraform repo?",
+      "expected_output": "A list of open PRs on hummel.casa/terraform, showing PR numbers, titles, and branch names",
+      "files": []
+    },
+    {
+      "id": 1,
+      "prompt": "Update the description on PR #50 in the terraform repo to add '- grist RAM bumped from 512 to 2048 MiB' as the first bullet",
+      "expected_output": "The PR description is updated via PATCH with the new bullet prepended",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "What branches exist on the ansible repo? Show when each was last committed to.",
+      "expected_output": "A list of branches on hummel.casa/ansible with their most recent commit date and author",
+      "files": []
+    }
+  ]
+}
