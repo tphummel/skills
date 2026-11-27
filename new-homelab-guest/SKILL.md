@@ -50,6 +50,20 @@ The user will frequently want to specify their own values rather than using the 
 9. **Does it need Node.js?** If so, which LTS version?
 10. **Any special packages, config files, or environment variables?**
 
+#### Inspect the container image before asking (container guests)
+
+Before asking questions 6–10, inspect the image yourself so you can propose answers instead of guessing:
+
+1. **Image config** — read `ExposedPorts`, `Env` (defaults), `Volumes`, `User`, and labels (especially `org.opencontainers.image.source`). If `docker`/`podman` aren't usable locally, fetch the config blob anonymously from the registry API (token → manifest → per-arch manifest → config digest → blob).
+2. **Container user UID** — if `User` is a name rather than a number, extract `etc/passwd` from the image layers to find the UID; host-mounted data directories must be owned by it.
+3. **Upstream docs and config code** — follow the source label to the repo and read the README plus any config loader (e.g. `config.go`, `settings.py`, `.env.example`). Look for **env vars whose defaults assume localhost or a dev setup** and must be set to the public URL. Common examples:
+   - WebAuthn/passkeys: `RP_ID`, `RP_ORIGINS` / `RP_ORIGIN` (wrong values make registration fail with "Error validating origin")
+   - Base/public URL: `BASE_URL`, `PUBLIC_URL`, `APP_URL`, `ORIGIN`, `ALLOWED_HOSTS`, `CSRF_TRUSTED_ORIGINS`
+   - Listen address: `BIND`/`HOST` (set to `127.0.0.1` so the app is only reachable through Caddy)
+   - Registration/first-user toggles, secret keys that must be generated
+
+Present what you found to the user and set those env vars in the playbook from `{{ domain }}`.
+
 ---
 
 ## Part 1: Terraform
@@ -178,13 +192,15 @@ Read an existing playbook (e.g., `$ANSIBLE_REPO/verdaccio.yml`) to get the curre
          RestartSec=5s
          ExecStartPre=-/usr/bin/podman rm -f {{ container.name }}
          ExecStart=/usr/bin/podman run --name {{ container.name }} \
+           --network host \
            --security-opt=no-new-privileges \
            --pids-limit=100 \
            --memory=512m \
            --memory-swap=512m \
-           -p 127.0.0.1:{{ container.exposed_port }}:{{ container.exposed_port }} \
            -v /path/on/host:/path/in/container:ro \
            -v /path/on/host:/path/in/container \
+           -e BIND=127.0.0.1 \
+           -e PORT={{ container.exposed_port }} \
            -e TZ=America/Los_Angeles \
            {{ container.image_name }}:{{ container.image_tag }}
          ExecStop=/usr/bin/podman stop -t 10 {{ container.name }}
@@ -199,6 +215,12 @@ Read an existing playbook (e.g., `$ANSIBLE_REPO/verdaccio.yml`) to get the curre
        - Reload systemd
        - Start service
    ```
+
+   **Always use `--network host`, never `-p` port publishing.** With bridge networking, podman (netavark) adds nftables DNAT rules for `127.0.0.1:<port>` and must remove them on stop. On these LXC guests the container's netns file (under `/run/user/0/netns/`) can disappear before teardown, so teardown fails with `failed to Statfs ... no such file or directory` and leaves a stale DNAT rule pointing at the old container IP. After the next restart Caddy logs `dial tcp 127.0.0.1:<port>: i/o timeout` and users get 502s. Host networking skips NAT entirely.
+
+   Because host networking exposes whatever address the app binds, make the app listen on `127.0.0.1` only (Caddy is the public entrypoint). Use the image's own env var for this — `BIND`/`PORT` above are examples; check the image's docs/config for the real names (e.g. `HOST`, `LISTEN_ADDR`, `--host` flag). If the app can't be bound to localhost, tell the user before deploying.
+
+   Recovering a guest that already has stale rules: switch the unit to `--network host` via ansible-pull, then reboot the guest (a reboot clears the nft rules; if the old bridge-mode unit ran once more at boot before ansible-pull, a second reboot may be needed). Verify with `nft list ruleset | grep -c 'dnat to 10.88'` → `0`.
 
 3. **Handlers** for reload, restart, and image cleanup:
    ```yaml
@@ -226,7 +248,7 @@ Read an existing playbook (e.g., `$ANSIBLE_REPO/verdaccio.yml`) to get the curre
          podman image ls --format '{{'{{'}}.Repository{{'}}'}}:{{'{{'}}.Tag{{'}}'}}' "${repo}" || exit 0
          echo "==> Keeping: ${keep_ref}"
          old_images=$(podman image ls --format '{{'{{'}}.Repository{{'}}'}}:{{'{{'}}.Tag{{'}}'}}' "${repo}" \
-           | awk -v keep="${keep_ref}" '$0 != keep && $0 !~ /<none>:/ {print $0}')
+           | grep -vxF "${keep_ref}" | grep -v '<none>:' || true)
          if [ -z "$old_images" ]; then
            echo "==> No old images found to remove."
          else
